@@ -6,6 +6,30 @@ import multer from "multer";
 import os from "os";
 import fs from "fs";
 
+function normalizeText(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2010-\u2015]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function withRetry<T>(operation: () => Promise<T>, maxRetries = 2): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      if (attempt >= maxRetries) throw error;
+      const delay = Math.pow(2, attempt) * 1000;
+      console.warn(`Operation failed, retrying in ${delay}ms...`, error.message);
+      await new Promise(r => setTimeout(r, delay));
+      attempt++;
+    }
+  }
+}
 
 function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = false) {
   const properties: any = {};
@@ -56,7 +80,8 @@ function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = fals
 
   return {
     type: Type.OBJECT,
-    properties
+    properties,
+    required: Object.keys(properties)
   };
 }
 
@@ -66,7 +91,13 @@ async function startServer() {
 
   const upload = multer({ dest: os.tmpdir() });
 
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err.status === 413) {
+      return res.status(413).json({ error: "Payload too large. The limit is 50MB." });
+    }
+    next(err);
+  });
 
   // API Routes
   app.post("/api/upload-audio", upload.single("audio"), async (req, res) => {
@@ -88,17 +119,23 @@ async function startServer() {
         }
       });
       
-      const uploadedFile = await ai.files.upload({
+      const uploadedFile = await withRetry(() => ai.files.upload({
         file: req.file.path,
         config: {
           mimeType: req.file.mimetype,
         }
-      });
+      }));
 
-      let fileInfo = await ai.files.get({ name: uploadedFile.name });
+      let fileInfo = await withRetry(() => ai.files.get({ name: uploadedFile.name }));
+      const startTime = Date.now();
       while (fileInfo.state === "PROCESSING") {
+        if (Date.now() - startTime > 15 * 60 * 1000) {
+          await ai.files.delete({ name: uploadedFile.name }).catch(() => {});
+          fs.unlinkSync(req.file.path);
+          return res.status(504).json({ error: "File processing timed out after 15 minutes." });
+        }
         await new Promise(resolve => setTimeout(resolve, 3000));
-        fileInfo = await ai.files.get({ name: uploadedFile.name });
+        fileInfo = await withRetry(() => ai.files.get({ name: uploadedFile.name }));
       }
 
       if (fileInfo.state === "FAILED") {
@@ -110,7 +147,7 @@ Please analyze the provided audio recording.
 ${speakers ? `The speakers in this meeting are: ${speakers}. Please assign their names correctly.` : ""}
 Extract requested fields.`;
 
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.6-flash",
         contents: [
           {
@@ -125,7 +162,7 @@ Extract requested fields.`;
           responseMimeType: "application/json",
           responseSchema: buildAnalysisSchema(selectedOptions, req.body.includeSentiment === 'true')
         }
-      });
+      }));
 
       await ai.files.delete({ name: uploadedFile.name }).catch(() => {});
       fs.unlinkSync(req.file.path);
@@ -156,7 +193,7 @@ Extract requested fields.`;
       }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.6-flash",
         contents: `You are an expert meeting analyst operating with Codette-style multi-perspective reasoning and ISNAD-level epistemic governance.
         
@@ -168,7 +205,7 @@ ${transcript}`,
           responseMimeType: "application/json",
           responseSchema: buildAnalysisSchema([], req.body.includeSentiment === 'true')
         }
-      });
+      }));
 
       let analysisData = {};
       try {
@@ -194,7 +231,7 @@ ${transcript}`,
       }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
         contents: `SOURCE TRANSCRIPT:
 ${transcript}
@@ -236,11 +273,12 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
                 verdict: { type: Type.STRING, enum: ["confirmed", "probable", "disputed", "gap", "fabricated"] },
                 quote: { type: Type.STRING, nullable: true },
                 reasoning: { type: Type.STRING }
-              }
+              },
+              required: ["id", "claim", "sourceField", "verdict", "reasoning"]
             }
           }
         }
-      });
+      }));
 
       let claims = [];
       try {
@@ -251,10 +289,19 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
 
       // Ensure quotes are valid substrings and downgrade if necessary
       const counts: Record<string, number> = { confirmed: 0, probable: 0, disputed: 0, gap: 0, fabricated: 0 };
+      const validVerdicts = ['confirmed', 'probable', 'disputed', 'gap', 'fabricated'];
       
       claims.forEach((claim: any) => {
-        if ((claim.verdict === 'confirmed' || claim.verdict === 'probable') && claim.quote) {
-          if (!transcript.includes(claim.quote)) {
+        if (!validVerdicts.includes(claim.verdict)) {
+          console.warn(`Unrecognized verdict '${claim.verdict}' coerced to 'gap'`);
+          claim.verdict = 'gap';
+        }
+        if (claim.verdict === 'confirmed' || claim.verdict === 'probable') {
+          if (!claim.quote || !claim.quote.trim()) {
+            claim.verdict = 'gap';
+            claim.reasoning += " (no quote supplied)";
+            claim.quote = null;
+          } else if (!normalizeText(transcript).includes(normalizeText(claim.quote))) {
             claim.verdict = 'gap';
             claim.reasoning += " (quote failed verbatim check)";
             claim.quote = null;

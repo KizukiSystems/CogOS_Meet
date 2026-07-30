@@ -58,4 +58,5 @@ export interface Meeting {
   isUploadedAudio?: boolean;
   hideTranscript?: boolean;
   analysis?: MeetingAnalysis;
+  verificationStatus?: 'pending' | 'complete' | 'unavailable' | 'skipped';
 }

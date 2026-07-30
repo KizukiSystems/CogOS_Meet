@@ -28,7 +28,7 @@ export async function createDriveFile(title: string, content: string) {
   return res.json();
 }
 
-export async function sendEmail(to: string, subject: string, bodyText: string) {
+export async function createEmailDraft(to: string, subject: string, bodyText: string) {
   const token = await getAccessToken();
   if (!token) throw new Error('Not authenticated');
 
@@ -47,19 +47,21 @@ export async function sendEmail(to: string, subject: string, bodyText: string) {
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      raw: encodedMessage
+      message: {
+        raw: encodedMessage
+      }
     })
   });
 
   if (!res.ok) {
-    throw new Error('Failed to send email');
+    throw new Error('Failed to create email draft');
   }
 
   return res.json();

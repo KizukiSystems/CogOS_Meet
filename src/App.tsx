@@ -7,7 +7,7 @@ import { exportToMarkdown, exportToWord } from './utils/export';
 import { TranscriptRenderer } from './components/TranscriptRenderer';
 import { VerificationPanel } from './components/VerificationPanel';
 import { initAuth, googleSignIn, logout, getAccessToken } from './lib/firebase';
-import { createDriveFile, sendEmail, appendToTrackerSheet } from './lib/workspace';
+import { createDriveFile, createEmailDraft, appendToTrackerSheet } from './lib/workspace';
 import { User } from 'firebase/auth';
 
 const CATEGORIES = ['Sales', 'Engineering', 'General', 'Marketing', 'Product', 'Design', 'Other'];
@@ -128,16 +128,29 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript, analysis }),
       });
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type');
+        let errorMsg = 'Failed to verify';
+        if (contentType && contentType.includes('application/json')) {
+          const errData = await response.json();
+          errorMsg = errData.error || errorMsg;
+        } else {
+          errorMsg = `Server error: ${response.status} ${response.statusText}`;
+        }
+        throw new Error(errorMsg);
+      }
       const data = await response.json();
       if (data.verification) {
         setMeetings(prev => prev.map(m => 
-          m.id === meetingId ? { ...m, analysis: { ...m.analysis, verification: data.verification } } : m
+          m.id === meetingId ? { ...m, analysis: { ...m.analysis, verification: data.verification }, verificationStatus: 'complete' } : m
         ));
       } else {
         console.warn("Verification failed, no data returned.");
+        setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, verificationStatus: 'unavailable' } : m));
       }
     } catch (err) {
       console.error("Verification failed", err);
+      setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, verificationStatus: 'unavailable' } : m));
     } finally {
       setIsVerifying(false);
     }
@@ -147,6 +160,7 @@ export default function App() {
     if (!textToAnalyze.trim()) return;
     
     setIsAnalyzing(true);
+    setMeetings(prev => prev.map(m => m.id === id ? { ...m, verificationStatus: 'pending' } : m));
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
@@ -154,15 +168,30 @@ export default function App() {
         body: JSON.stringify({ transcript: textToAnalyze }),
       });
       
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type');
+        let errorMsg = 'Failed to analyze';
+        if (contentType && contentType.includes('application/json')) {
+          const errData = await response.json();
+          errorMsg = errData.error || errorMsg;
+        } else {
+          errorMsg = `Server error: ${response.status} ${response.statusText}`;
+        }
+        throw new Error(errorMsg);
+      }
+
       const data = await response.json();
       
       if (data.analysis) {
         setMeetings((prev) => 
-          prev.map((m) => m.id === id ? { ...m, analysis: data.analysis } : m)
+          prev.map((m) => m.id === id ? { ...m, analysis: data.analysis, verificationStatus: 'pending' } : m)
         );
+        handleVerify(textToAnalyze, data.analysis, id);
       }
     } catch (err) {
       console.error("Analysis failed", err);
+      setMeetings(prev => prev.map(m => m.id === id ? { ...m, verificationStatus: 'unavailable' } : m));
+      alert((err as Error).message);
     } finally {
       setIsAnalyzing(false);
     }
@@ -182,6 +211,18 @@ export default function App() {
         body: formData,
       });
 
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type');
+        let errorMsg = 'Failed to analyze audio';
+        if (contentType && contentType.includes('application/json')) {
+          const errData = await response.json();
+          errorMsg = errData.error || errorMsg;
+        } else {
+          errorMsg = `Server error: ${response.status} ${response.statusText}`;
+        }
+        throw new Error(errorMsg);
+      }
+
       const data = await response.json();
 
       if (data.analysis) {
@@ -192,7 +233,8 @@ export default function App() {
           transcript: data.analysis.verbatimTranscript || "Audio file analyzed. See generated outputs in the synthesis panel.",
           isUploadedAudio: true,
           hideTranscript: !options.includes("verbatim"),
-          analysis: data.analysis
+          analysis: data.analysis,
+          verificationStatus: 'pending'
         };
 
         setMeetings(prev => [newMeeting, ...prev]);
@@ -202,7 +244,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Upload failed", err);
-      alert("Failed to analyze audio recording.");
+      alert((err as Error).message);
     } finally {
       setIsUploading(false);
     }
@@ -316,7 +358,7 @@ export default function App() {
     }
   };
 
-  const handleSendEmail = async () => {
+  const handleCreateDraft = async () => {
     if (!activeMeeting) return;
     if (needsAuth || !token) {
       alert('Please sign in to Google first');
@@ -334,11 +376,11 @@ export default function App() {
         bodyText += `Summary:\n${activeMeeting.analysis.summary || activeMeeting.analysis.executiveSummary || ''}`;
       }
 
-      await sendEmail(email, subject, bodyText);
-      alert(`Email sent to ${email}`);
+      await createEmailDraft(email, subject, bodyText);
+      alert(`Draft created. Check your Gmail drafts.`);
     } catch (err) {
       console.error(err);
-      alert('Failed to send email');
+      alert('Failed to create draft');
     } finally {
       setIsWorkspaceAction(null);
       setExportMenuOpen(false);
@@ -651,12 +693,12 @@ export default function App() {
                         Save to Google Drive
                       </button>
                       <button 
-                        onClick={handleSendEmail}
+                        onClick={handleCreateDraft}
                         disabled={isWorkspaceAction === 'gmail'}
                         className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/80 hover:bg-amber-500/10 hover:text-amber-500 transition-colors text-left disabled:opacity-50"
                       >
                         {isWorkspaceAction === 'gmail' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
-                        Email via Gmail
+                        Create Draft
                       </button>
                       <button 
                         onClick={handleLogToSheets}
@@ -772,8 +814,36 @@ export default function App() {
                   <h3 className="text-[11px] uppercase tracking-[0.2em] text-white/40">Codette Synthesis</h3>
                 </div>
                 <div className="flex items-center gap-1.5 px-2 py-1 bg-white/5 border border-white/10 rounded">
-                  <ShieldCheck className="w-3 h-3 text-emerald-500" />
-                  <span className="text-[9px] uppercase tracking-widest text-emerald-500/80">ISNAD Protected</span>
+                  {activeMeeting.verificationStatus === 'pending' && (
+                    <>
+                      <Loader2 className="w-3 h-3 text-amber-500 animate-spin" />
+                      <span className="text-[9px] uppercase tracking-widest text-amber-500/80">Verifying...</span>
+                    </>
+                  )}
+                  {activeMeeting.verificationStatus === 'complete' && (
+                    <>
+                      <ShieldCheck className="w-3 h-3 text-emerald-500" />
+                      <span className="text-[9px] uppercase tracking-widest text-emerald-500/80">Verified</span>
+                    </>
+                  )}
+                  {activeMeeting.verificationStatus === 'unavailable' && (
+                    <>
+                      <ShieldCheck className="w-3 h-3 text-red-500 opacity-50" />
+                      <button onClick={() => activeMeeting.analysis && handleVerify(activeMeeting.transcript, activeMeeting.analysis, activeMeeting.id)} className="text-[9px] uppercase tracking-widest text-red-500/80 hover:text-red-400">Verify Failed - Retry</button>
+                    </>
+                  )}
+                  {activeMeeting.verificationStatus === 'skipped' && (
+                    <>
+                      <ShieldCheck className="w-3 h-3 text-white/40" />
+                      <span className="text-[9px] uppercase tracking-widest text-white/40">Verification Skipped</span>
+                    </>
+                  )}
+                  {!activeMeeting.verificationStatus && (
+                    <>
+                      <ShieldCheck className="w-3 h-3 text-white/40" />
+                      <span className="text-[9px] uppercase tracking-widest text-white/40">Unverified</span>
+                    </>
+                  )}
                 </div>
               </div>
               
