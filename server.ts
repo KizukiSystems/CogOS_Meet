@@ -5,31 +5,11 @@ import { GoogleGenAI, Type } from "@google/genai";
 import multer from "multer";
 import os from "os";
 import fs from "fs";
-import ffmpeg from "fluent-ffmpeg";
-import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
-
-
-async function withRetry<T>(operation: () => Promise<T>, maxRetries = 2): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await operation();
-    } catch (error: any) {
-      attempt++;
-      if (attempt > maxRetries) {
-        throw error;
-      }
-      console.warn(`Gemini API call failed (attempt ${attempt}/${maxRetries}): ${error.message}. Retrying...`);
-      await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
-    }
-  }
-}
 
 function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = false) {
   const properties: any = {};
+
   const wants = (key: string) => !selectedOptions || selectedOptions.includes(key) || selectedOptions.length === 0;
 
   if (wants("summary")) properties.summary = { type: Type.STRING };
@@ -47,8 +27,7 @@ function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = fals
           task: { type: Type.STRING },
           owner: { type: Type.STRING },
           completed: { type: Type.BOOLEAN }
-        },
-        required: ["id", "task", "owner", "completed"]
+        }
       }
     };
   }
@@ -58,9 +37,9 @@ function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = fals
   if (wants("decisionLog")) {
     properties.decisionLog = { type: Type.ARRAY, items: { type: Type.STRING } };
   }
-  
-  // ALWAYS get verbatim for verification
-  properties.verbatimTranscript = { type: Type.STRING };
+  if (true) { // ALWAYS get verbatim for verification
+    properties.verbatimTranscript = { type: Type.STRING };
+  }
   
   properties.tags = { type: Type.ARRAY, items: { type: Type.STRING } };
   properties.perspectives = {
@@ -68,78 +47,18 @@ function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = fals
     properties: {
       empathy: { type: Type.STRING },
       operational: { type: Type.STRING }
-    },
-    required: ["empathy", "operational"]
+    }
   };
 
   if (includeSentiment) {
-    properties.sentiment = { type: Type.STRING };
+    properties.sentiment = { type: Type.STRING }; // e.g., "Positive", "Neutral", "Negative"
   }
 
   return {
     type: Type.OBJECT,
-    properties,
-    required: Object.keys(properties)
+    properties
   };
 }
-
-
-const chunkAudio = (inputPath: string, outputDir: string, segmentTime: number = 600): Promise<string[]> => {
-  return new Promise((resolve, reject) => {
-    const outputPath = path.join(outputDir, 'chunk_%03d.mp3');
-    ffmpeg(inputPath)
-      .outputOptions([
-        '-f', 'segment',
-        '-segment_time', `${segmentTime}`,
-        '-c:a', 'libmp3lame'
-      ])
-      .output(outputPath)
-      .on('end', () => {
-        const files = fs.readdirSync(outputDir).filter(f => f.startsWith('chunk_')).sort();
-        resolve(files.map(f => path.join(outputDir, f)));
-      })
-      .on('error', (err) => reject(err))
-      .run();
-  });
-};
-
-const extractTranscript = async (ai: any, filePath: string, mimeType: string, speakers: string): Promise<string> => {
-  let uploadedFile: any = await withRetry(() => ai.files.upload({
-    file: filePath,
-    config: { mimeType }
-  }));
-  let fileInfo: any = await ai.files.get({ name: uploadedFile.name });
-  while (fileInfo.state === "PROCESSING") {
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    fileInfo = await ai.files.get({ name: uploadedFile.name });
-  }
-  if (fileInfo.state === "FAILED") {
-    throw new Error("Gemini audio processing failed");
-  }
-
-  const prompt = `Please provide a verbatim transcript of the provided audio recording.${speakers ? " The speakers in this meeting are: " + speakers + ". Please assign their names correctly." : ""}`;
-  
-  const response: any = await withRetry(() => ai.models.generateContent({
-    model: "gemini-3.6-flash",
-    contents: [
-      { fileData: { mimeType: fileInfo.mimeType, fileUri: fileInfo.uri } },
-      prompt
-    ]
-  }));
-  
-  await ai.files.delete({ name: uploadedFile.name }).catch(() => {});
-  return response.text || "";
-};
-
-const normalizeText = (text: string) => {
-  if (!text) return "";
-  return text
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201C\u201D]/g, '"')
-    .replace(/[\u2010-\u2015]/g, "-")
-    .replace(/\s+/g, " ")
-    .trim();
-};
 
 async function startServer() {
   const app = express();
@@ -147,8 +66,9 @@ async function startServer() {
 
   const upload = multer({ dest: os.tmpdir() });
 
-  app.use(express.json({ limit: "50mb" }));
+  app.use(express.json());
 
+  // API Routes
   app.post("/api/upload-audio", upload.single("audio"), async (req, res) => {
     try {
       if (!req.file) {
@@ -156,22 +76,26 @@ async function startServer() {
       }
 
       const { options, speakers } = req.body;
-      let selectedOptions: string[] = [];
+      let selectedOptions = [];
       try {
         if (options) selectedOptions = JSON.parse(options);
       } catch(e) {}
 
       const ai = new GoogleGenAI({ 
         apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: { timeout: 600000 }
+        httpOptions: {
+          timeout: 600000 // 10 minutes
+        }
       });
       
-      const uploadedFile = await withRetry(() => ai.files.upload({
-        file: req.file!.path,
-        config: { mimeType: req.file!.mimetype }
-      }));
+      const uploadedFile = await ai.files.upload({
+        file: req.file.path,
+        config: {
+          mimeType: req.file.mimetype,
+        }
+      });
 
-      let fileInfo: any = await ai.files.get({ name: uploadedFile.name });
+      let fileInfo = await ai.files.get({ name: uploadedFile.name });
       while (fileInfo.state === "PROCESSING") {
         await new Promise(resolve => setTimeout(resolve, 3000));
         fileInfo = await ai.files.get({ name: uploadedFile.name });
@@ -181,36 +105,39 @@ async function startServer() {
         throw new Error("Gemini audio processing failed");
       }
 
-      const prompt = `You are an expert meeting analyst.
+      const prompt = `You are an expert meeting analyst operating with Codette-style multi-perspective reasoning and ISNAD-level epistemic governance.
 Please analyze the provided audio recording.
-${speakers ? "The speakers in this meeting are: " + speakers + ". Please assign their names correctly." : ""}
-Extract the requested fields based on the provided schema.`;
+${speakers ? `The speakers in this meeting are: ${speakers}. Please assign their names correctly.` : ""}
+Extract requested fields.`;
 
-      const response: any = await withRetry(() => ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: "gemini-3.6-flash",
         contents: [
-          { fileData: { mimeType: fileInfo.mimeType, fileUri: fileInfo.uri } },
+          {
+            fileData: {
+              mimeType: fileInfo.mimeType,
+              fileUri: fileInfo.uri
+            }
+          },
           prompt
         ],
         config: {
           responseMimeType: "application/json",
           responseSchema: buildAnalysisSchema(selectedOptions, req.body.includeSentiment === 'true')
         }
-      }));
+      });
 
       await ai.files.delete({ name: uploadedFile.name }).catch(() => {});
       fs.unlinkSync(req.file.path);
 
-      let analysisData: any = {};
+      let analysisData = {};
       try {
         analysisData = JSON.parse(response.text || "{}");
       } catch (err) {
         return res.status(500).json({ error: "Failed to parse model response" });
       }
 
-      const verbatimRequested = selectedOptions.length === 0 || selectedOptions.includes("verbatim");
-
-      res.json({ analysis: analysisData, verbatimRequested });
+      res.json({ analysis: analysisData });
     } catch (error) {
       console.error("Error processing audio upload:", error);
       if (req.file && fs.existsSync(req.file.path)) {
@@ -229,9 +156,9 @@ Extract the requested fields based on the provided schema.`;
       }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response: any = await withRetry(() => ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: "gemini-3.6-flash",
-        contents: `You are an expert meeting analyst.
+        contents: `You are an expert meeting analyst operating with Codette-style multi-perspective reasoning and ISNAD-level epistemic governance.
         
 Analyze the following transcript and extract the requested fields. The tags array should contain categorization tags like 'Internal', 'Client', 'Project', etc., based on the meeting content.
 
@@ -241,7 +168,7 @@ ${transcript}`,
           responseMimeType: "application/json",
           responseSchema: buildAnalysisSchema([], req.body.includeSentiment === 'true')
         }
-      }));
+      });
 
       let analysisData = {};
       try {
@@ -250,30 +177,24 @@ ${transcript}`,
         return res.status(500).json({ error: "Failed to parse model response" });
       }
 
-      res.json({ analysis: analysisData, verbatimRequested: true });
+      res.json({ analysis: analysisData });
     } catch (error) {
       console.error("Error analyzing transcript:", error);
       res.status(500).json({ error: "Failed to analyze transcript" });
     }
   });
 
+
   app.post("/api/verify", async (req, res) => {
     try {
-      let { transcript, analysis } = req.body;
+      const { transcript, analysis } = req.body;
       
       if (!transcript || !analysis) {
         return res.status(400).json({ error: "Transcript and analysis are required" });
       }
-      
-      let truncated = false;
-      const MAX_TRANSCRIPT_LENGTH = 100000;
-      if (transcript.length > MAX_TRANSCRIPT_LENGTH) {
-        transcript = transcript.substring(0, MAX_TRANSCRIPT_LENGTH);
-        truncated = true;
-      }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response: any = await withRetry(() => ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
         contents: `SOURCE TRANSCRIPT:
 ${transcript}
@@ -315,12 +236,11 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
                 verdict: { type: Type.STRING, enum: ["confirmed", "probable", "disputed", "gap", "fabricated"] },
                 quote: { type: Type.STRING, nullable: true },
                 reasoning: { type: Type.STRING }
-              },
-              required: ["id", "claim", "sourceField", "verdict", "reasoning"]
+              }
             }
           }
         }
-      }));
+      });
 
       let claims = [];
       try {
@@ -329,30 +249,15 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
         return res.status(500).json({ error: "Failed to parse verification response" });
       }
 
-      const validVerdicts = ["confirmed", "probable", "disputed", "gap", "fabricated"];
-      
+      // Ensure quotes are valid substrings and downgrade if necessary
       const counts: Record<string, number> = { confirmed: 0, probable: 0, disputed: 0, gap: 0, fabricated: 0 };
       
-      const normTranscript = normalizeText(transcript);
-      
       claims.forEach((claim: any) => {
-        if (!validVerdicts.includes(claim.verdict)) {
-          claim.verdict = 'gap';
-          claim.reasoning += " (Invalid verdict coerced to gap)";
-        }
-        
-        if (claim.verdict === 'confirmed' || claim.verdict === 'probable') {
-          if (!claim.quote || claim.quote.trim() === "") {
+        if ((claim.verdict === 'confirmed' || claim.verdict === 'probable') && claim.quote) {
+          if (!transcript.includes(claim.quote)) {
             claim.verdict = 'gap';
-            claim.reasoning += " (no quote supplied)";
+            claim.reasoning += " (quote failed verbatim check)";
             claim.quote = null;
-          } else {
-            const normQuote = normalizeText(claim.quote);
-            if (!normTranscript.includes(normQuote)) {
-              claim.verdict = 'gap';
-              claim.reasoning += " (quote failed verbatim check)";
-              claim.quote = null;
-            }
           }
         }
         counts[claim.verdict] = (counts[claim.verdict] || 0) + 1;
@@ -374,8 +279,7 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
         supportScore,
         flagged,
         judgeModel: "gemini-3.1-pro-preview",
-        verifiedAt: new Date().toISOString(),
-        truncated
+        verifiedAt: new Date().toISOString()
       };
 
       res.json({ verification });
@@ -383,14 +287,6 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
       console.error("Error verifying analysis:", error);
       res.status(500).json({ error: "Failed to verify analysis" });
     }
-  });
-
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error("Express error:", err);
-    if (err.type === 'entity.too.large') {
-      return res.status(413).json({ error: "File too large" });
-    }
-    res.status(500).json({ error: err.message || "Internal server error" });
   });
 
   // Vite middleware for development

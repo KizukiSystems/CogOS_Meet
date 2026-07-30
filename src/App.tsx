@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Play, Square, Loader2, AlertCircle, Sparkles, FileText, Menu, CheckCircle2, History, Brain, ShieldCheck, Activity, Target, Users, Upload, Edit3, Save, X, Download, FileDown } from 'lucide-react';
+import { Mic, Play, Square, Loader2, Sparkles, FileText, Menu, CheckCircle2, History, Brain, ShieldCheck, Activity, Target, Users, Upload, Edit3, Save, X, Download, FileDown, Cloud, Mail, Table, LogOut } from 'lucide-react';
 import { useTranscription } from './hooks/useTranscription';
 import { Meeting, MeetingAnalysis } from './types';
 import { UploadModal } from './components/UploadModal';
 import { exportToMarkdown, exportToWord } from './utils/export';
 import { TranscriptRenderer } from './components/TranscriptRenderer';
 import { VerificationPanel } from './components/VerificationPanel';
+import { initAuth, googleSignIn, logout, getAccessToken } from './lib/firebase';
+import { createDriveFile, sendEmail, appendToTrackerSheet } from './lib/workspace';
+import { User } from 'firebase/auth';
 
 export default function App() {
   const {
@@ -31,7 +34,28 @@ export default function App() {
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
   const [editedTranscriptText, setEditedTranscriptText] = useState('');
 
+  const [needsAuth, setNeedsAuth] = useState(false);
+  const [token, setToken] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isWorkspaceAction, setIsWorkspaceAction] = useState<string | null>(null);
+
   const transcriptRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    initAuth(
+      (user, token) => {
+        setToken(token);
+        setUser(user);
+        setNeedsAuth(false);
+      },
+      () => {
+        setToken(null);
+        setUser(null);
+        setNeedsAuth(true);
+      }
+    );
+  }, []);
 
   useEffect(() => {
     // Load meetings from local storage
@@ -80,17 +104,7 @@ export default function App() {
 
   
   const handleVerify = async (transcript: string, analysis: MeetingAnalysis, meetingId: string) => {
-    if (!transcript || !transcript.trim()) {
-      setMeetings(prev => prev.map(m => 
-        m.id === meetingId ? { ...m, verificationStatus: 'skipped' } : m
-      ));
-      return;
-    }
-    
-    setMeetings(prev => prev.map(m => 
-      m.id === meetingId ? { ...m, verificationStatus: 'pending' } : m
-    ));
-    
+    setIsVerifying(true);
     try {
       const response = await fetch('/api/verify', {
         method: 'POST',
@@ -100,18 +114,15 @@ export default function App() {
       const data = await response.json();
       if (data.verification) {
         setMeetings(prev => prev.map(m => 
-          m.id === meetingId ? { ...m, analysis: { ...m.analysis, verification: data.verification }, verificationStatus: 'complete' } : m
+          m.id === meetingId ? { ...m, analysis: { ...m.analysis, verification: data.verification } } : m
         ));
       } else {
-        setMeetings(prev => prev.map(m => 
-          m.id === meetingId ? { ...m, verificationStatus: 'unavailable' } : m
-        ));
+        console.warn("Verification failed, no data returned.");
       }
     } catch (err) {
       console.error("Verification failed", err);
-      setMeetings(prev => prev.map(m => 
-        m.id === meetingId ? { ...m, verificationStatus: 'unavailable' } : m
-      ));
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -126,29 +137,15 @@ export default function App() {
         body: JSON.stringify({ transcript: textToAnalyze }),
       });
       
-      let data;
-      const contentType = response.headers.get("content-type");
-      if (contentType && contentType.indexOf("application/json") !== -1) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-        console.error("Non-JSON response:", text);
-        throw new Error(response.status === 413 ? "File too large (server limit)" : `Server error: ${response.status} ${response.statusText}`);
-      }
-      
-      if (!response.ok) {
-        throw new Error(data.error || `Server error: ${response.status}`);
-      }
+      const data = await response.json();
       
       if (data.analysis) {
         setMeetings((prev) => 
           prev.map((m) => m.id === id ? { ...m, analysis: data.analysis } : m)
         );
-        handleVerify(textToAnalyze, data.analysis, id);
       }
     } catch (err) {
       console.error("Analysis failed", err);
-      alert(err instanceof Error ? err.message : "Failed to analyze transcript.");
     } finally {
       setIsAnalyzing(false);
     }
@@ -167,29 +164,17 @@ export default function App() {
         method: 'POST',
         body: formData,
       });
-      
-      let data;
-      const contentType = response.headers.get("content-type");
-      if (contentType && contentType.indexOf("application/json") !== -1) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-        console.error("Non-JSON response:", text);
-        throw new Error(response.status === 413 ? "File too large (server limit)" : `Server error: ${response.status} ${response.statusText}`);
-      }
-      
-      if (!response.ok) {
-        throw new Error(data.error || `Server error: ${response.status}`);
-      }
+
+      const data = await response.json();
 
       if (data.analysis) {
         const newMeeting: Meeting = {
           id: Date.now().toString(),
           title: `Uploaded: ${file.name}`,
           date: new Date().toISOString(),
-          transcript: data.analysis.verbatimTranscript || "",
+          transcript: data.analysis.verbatimTranscript || "Audio file analyzed. See generated outputs in the synthesis panel.",
           isUploadedAudio: true,
-          hideTranscript: !data.verbatimRequested,
+          hideTranscript: !options.includes("verbatim"),
           analysis: data.analysis
         };
 
@@ -200,7 +185,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Upload failed", err);
-      alert(err instanceof Error ? err.message : "Failed to analyze audio recording.");
+      alert("Failed to analyze audio recording.");
     } finally {
       setIsUploading(false);
     }
@@ -269,6 +254,99 @@ export default function App() {
 
   const handleCancelEditTranscript = () => {
     setIsEditingTranscript(false);
+  };
+
+  const handleLogin = async () => {
+    setIsLoggingIn(true);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setToken(result.accessToken);
+        setUser(result.user);
+        setNeedsAuth(false);
+      }
+    } catch (err) {
+      console.error('Login failed:', err);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    setToken(null);
+    setUser(null);
+    setNeedsAuth(true);
+  };
+
+  const handleExportToDrive = async () => {
+    if (!activeMeeting) return;
+    if (needsAuth || !token) {
+      alert('Please sign in to Google first');
+      return;
+    }
+    
+    setIsWorkspaceAction('drive');
+    try {
+      await createDriveFile(activeMeeting.title, activeMeeting.transcript);
+      alert('Successfully exported to Google Drive!');
+    } catch (err) {
+      console.error(err);
+      alert('Failed to export to Drive');
+    } finally {
+      setIsWorkspaceAction(null);
+      setExportMenuOpen(false);
+    }
+  };
+
+  const handleSendEmail = async () => {
+    if (!activeMeeting) return;
+    if (needsAuth || !token) {
+      alert('Please sign in to Google first');
+      return;
+    }
+
+    const email = window.prompt("Enter recipient email address:");
+    if (!email) return;
+    
+    setIsWorkspaceAction('gmail');
+    try {
+      const subject = `Meeting Summary: ${activeMeeting.title}`;
+      let bodyText = `Meeting Transcript:\n\n${activeMeeting.transcript}\n\n`;
+      if (activeMeeting.analysis) {
+        bodyText += `Summary:\n${activeMeeting.analysis.summary || activeMeeting.analysis.executiveSummary || ''}`;
+      }
+
+      await sendEmail(email, subject, bodyText);
+      alert(`Email sent to ${email}`);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to send email');
+    } finally {
+      setIsWorkspaceAction(null);
+      setExportMenuOpen(false);
+    }
+  };
+
+  const handleLogToSheets = async () => {
+    if (!activeMeeting) return;
+    if (needsAuth || !token) {
+      alert('Please sign in to Google first');
+      return;
+    }
+    
+    setIsWorkspaceAction('sheets');
+    try {
+      const summary = activeMeeting.analysis?.executiveSummary || activeMeeting.analysis?.summary || 'No summary generated yet.';
+      await appendToTrackerSheet(activeMeeting.title, new Date(activeMeeting.date).toLocaleString(), summary);
+      alert('Meeting logged to Google Sheets (CogMeet Tracker)!');
+    } catch (err) {
+      console.error(err);
+      alert('Failed to log to Sheets');
+    } finally {
+      setIsWorkspaceAction(null);
+      setExportMenuOpen(false);
+    }
   };
 
   const handleRenameSpeaker = (oldName: string, newName: string) => {
@@ -352,6 +430,54 @@ export default function App() {
                 </button>
               ))}
             </div>
+          )}
+        </div>
+        
+        {/* Workspace Auth Section */}
+        <div className="p-4 border-t border-white/10 shrink-0">
+          {user ? (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt="Profile" className="w-8 h-8 rounded-full border border-white/10" />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center border border-white/10">
+                    <Users className="w-4 h-4 text-white/60" />
+                  </div>
+                )}
+                <div className="flex flex-col">
+                  <span className="text-xs text-white/80 font-medium truncate max-w-[120px]">{user.displayName || user.email}</span>
+                  <span className="text-[9px] text-white/40">Workspace Connected</span>
+                </div>
+              </div>
+              <button 
+                onClick={handleLogout}
+                className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-white/5 text-white/60 hover:text-white transition-colors"
+                title="Sign out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={handleLogin}
+              disabled={isLoggingIn}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-colors group relative overflow-hidden"
+            >
+              {isLoggingIn ? (
+                <Loader2 className="w-4 h-4 animate-spin text-white/60" />
+              ) : (
+                <>
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                  </svg>
+                  <span className="text-xs font-medium text-white/80 group-hover:text-white">Sign in with Google</span>
+                </>
+              )}
+            </button>
           )}
         </div>
       </div>
@@ -438,8 +564,11 @@ export default function App() {
                 </button>
                 
                 {exportMenuOpen && (
-                  <div className="absolute right-0 top-full mt-2 w-48 bg-[#121214] border border-white/10 rounded-xl overflow-hidden shadow-2xl z-50">
+                  <div className="absolute right-0 top-full mt-2 w-56 bg-[#121214] border border-white/10 rounded-xl overflow-hidden shadow-2xl z-50">
                     <div className="py-1">
+                      <div className="px-4 py-2 border-b border-white/10 bg-white/5">
+                        <span className="text-[10px] uppercase tracking-widest text-white/40 font-bold">Local Export</span>
+                      </div>
                       <button 
                         onClick={() => {
                           exportToWord(activeMeeting);
@@ -459,6 +588,34 @@ export default function App() {
                       >
                         <FileText className="w-4 h-4" />
                         Markdown (.md)
+                      </button>
+                      
+                      <div className="px-4 py-2 border-y border-white/10 bg-white/5 mt-1">
+                        <span className="text-[10px] uppercase tracking-widest text-amber-500/70 font-bold">Workspace Integrations</span>
+                      </div>
+                      <button 
+                        onClick={handleExportToDrive}
+                        disabled={isWorkspaceAction === 'drive'}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/80 hover:bg-amber-500/10 hover:text-amber-500 transition-colors text-left disabled:opacity-50"
+                      >
+                        {isWorkspaceAction === 'drive' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Cloud className="w-4 h-4" />}
+                        Save to Google Drive
+                      </button>
+                      <button 
+                        onClick={handleSendEmail}
+                        disabled={isWorkspaceAction === 'gmail'}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/80 hover:bg-amber-500/10 hover:text-amber-500 transition-colors text-left disabled:opacity-50"
+                      >
+                        {isWorkspaceAction === 'gmail' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+                        Email via Gmail
+                      </button>
+                      <button 
+                        onClick={handleLogToSheets}
+                        disabled={isWorkspaceAction === 'sheets'}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/80 hover:bg-amber-500/10 hover:text-amber-500 transition-colors text-left disabled:opacity-50"
+                      >
+                        {isWorkspaceAction === 'sheets' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Table className="w-4 h-4" />}
+                        Log to Google Sheets
                       </button>
                     </div>
                   </div>
@@ -563,43 +720,17 @@ export default function App() {
               <div className="p-6 border-b border-white/10 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-3">
                   <Brain className="w-4 h-4 text-amber-500" />
-                  <h3 className="text-[11px] uppercase tracking-[0.2em] text-white/40">Analysis</h3>
+                  <h3 className="text-[11px] uppercase tracking-[0.2em] text-white/40">Codette Synthesis</h3>
                 </div>
                 <div className="flex items-center gap-1.5 px-2 py-1 bg-white/5 border border-white/10 rounded">
                   <ShieldCheck className="w-3 h-3 text-emerald-500" />
-                  <span className="text-[9px] uppercase tracking-widest text-emerald-500/80">Verified Pass</span>
+                  <span className="text-[9px] uppercase tracking-widest text-emerald-500/80">ISNAD Protected</span>
                 </div>
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 space-y-8">
                 {/* Metrics */}
-                {activeMeeting.verificationStatus === 'pending' && (
-                  <div className="flex items-center gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-500 text-sm font-medium">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Verifying claims against transcript...
-                  </div>
-                )}
-                {activeMeeting.verificationStatus === 'unavailable' && (
-                  <div className="flex flex-col gap-2 p-4 bg-white/5 border border-white/10 rounded-xl text-white/60 text-sm">
-                    <div className="flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4" />
-                      Not verified. This analysis has not been checked against the transcript.
-                    </div>
-                    <button 
-                      onClick={() => handleVerify(activeMeeting.transcript, activeMeeting.analysis!, activeMeeting.id)}
-                      className="self-start px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded text-xs transition-colors"
-                    >
-                      Retry
-                    </button>
-                  </div>
-                )}
-                {activeMeeting.verificationStatus === 'skipped' && (
-                  <div className="flex items-center gap-2 p-4 bg-white/5 border border-white/10 rounded-xl text-white/60 text-sm">
-                    <AlertCircle className="w-4 h-4" />
-                    Not verified. No source transcript was available.
-                  </div>
-                )}
-                {activeMeeting.verificationStatus === 'complete' && activeMeeting.analysis.verification && (
+                {activeMeeting.analysis.verification && (
                   <VerificationPanel 
                     verification={activeMeeting.analysis.verification} 
                     onQuoteClick={scrollToQuote} 

@@ -49,8 +49,6 @@ export interface MeetingAnalysis {
   verification?: VerificationReport;
 }
 
-export type VerificationStatus = 'pending' | 'complete' | 'unavailable' | 'skipped';
-
 export interface Meeting {
   id: string;
   title: string;
@@ -59,5 +57,4 @@ export interface Meeting {
   isUploadedAudio?: boolean;
   hideTranscript?: boolean;
   analysis?: MeetingAnalysis;
-  verificationStatus?: VerificationStatus;
 }

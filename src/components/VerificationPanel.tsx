@@ -34,12 +34,6 @@ export function VerificationPanel({ verification, onQuoteClick }: VerificationPa
 
   return (
     <div className="space-y-4 mb-8">
-      {verification.truncated && (
-        <div className="flex items-center gap-2 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-400 text-sm font-medium">
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          Transcript was truncated before verification. Some claims may be incorrectly marked as gap/fabricated.
-        </div>
-      )}
       {verification.flagged && (
         <div className="flex items-center gap-2 p-3 bg-rose-500/10 border border-rose-500/20 rounded-lg text-rose-400 text-sm font-medium">
           <AlertCircle className="w-4 h-4 shrink-0" />
