@@ -5,6 +5,7 @@ import { Meeting, MeetingAnalysis } from './types';
 import { UploadModal } from './components/UploadModal';
 import { exportToMarkdown, exportToWord } from './utils/export';
 import { TranscriptRenderer } from './components/TranscriptRenderer';
+import { VerificationPanel } from './components/VerificationPanel';
 
 export default function App() {
   const {
@@ -21,6 +22,7 @@ export default function App() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [activeMeetingId, setActiveMeetingId] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -76,6 +78,30 @@ export default function App() {
     setActiveMeetingId(newMeeting.id);
   };
 
+  
+  const handleVerify = async (transcript: string, analysis: MeetingAnalysis, meetingId: string) => {
+    setIsVerifying(true);
+    try {
+      const response = await fetch('/api/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript, analysis }),
+      });
+      const data = await response.json();
+      if (data.verification) {
+        setMeetings(prev => prev.map(m => 
+          m.id === meetingId ? { ...m, analysis: { ...m.analysis, verification: data.verification } } : m
+        ));
+      } else {
+        console.warn("Verification failed, no data returned.");
+      }
+    } catch (err) {
+      console.error("Verification failed", err);
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
   const handleAnalyze = async (id: string, textToAnalyze: string) => {
     if (!textToAnalyze.trim()) return;
     
@@ -124,12 +150,14 @@ export default function App() {
           date: new Date().toISOString(),
           transcript: data.analysis.verbatimTranscript || "Audio file analyzed. See generated outputs in the synthesis panel.",
           isUploadedAudio: true,
+          hideTranscript: !options.includes("verbatim"),
           analysis: data.analysis
         };
 
         setMeetings(prev => [newMeeting, ...prev]);
         setActiveMeetingId(newMeeting.id);
         setUploadModalOpen(false);
+        handleVerify(newMeeting.transcript, data.analysis, newMeeting.id);
       }
     } catch (err) {
       console.error("Upload failed", err);
@@ -155,7 +183,34 @@ export default function App() {
   };
 
   const activeMeeting = activeMeetingId ? meetings.find(m => m.id === activeMeetingId) : null;
-  const displayTranscript = activeMeeting ? activeMeeting.transcript : transcript;
+  const displayTranscript = activeMeeting ? (activeMeeting.hideTranscript ? "Source transcript is hidden because verbatim was not requested." : activeMeeting.transcript) : transcript;
+
+  const scrollToQuote = (quote: string) => {
+    if (!transcriptRef.current) return;
+    const walker = document.createTreeWalker(transcriptRef.current, NodeFilter.SHOW_TEXT, null);
+    let node;
+    while (node = walker.nextNode()) {
+      if (node.nodeValue?.includes(quote)) {
+        const span = document.createElement('span');
+        span.className = 'bg-amber-500/30 text-amber-50';
+        span.textContent = quote;
+        const parent = node.parentNode;
+        if (parent) {
+          const split = node.nodeValue.split(quote);
+          const frag = document.createDocumentFragment();
+          frag.appendChild(document.createTextNode(split[0]));
+          frag.appendChild(span);
+          frag.appendChild(document.createTextNode(split[1]));
+          parent.replaceChild(frag, node);
+          span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => {
+            parent.replaceChild(document.createTextNode(node.nodeValue!), frag);
+          }, 3000);
+          break;
+        }
+      }
+    }
+  };
 
   const handleEditTranscript = () => {
     setEditedTranscriptText(displayTranscript);
@@ -452,7 +507,7 @@ export default function App() {
                   disabled={isAnalyzing}
                   className="flex items-center gap-3 px-8 py-3 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-full text-[11px] font-bold uppercase tracking-widest transition-colors shadow-lg shadow-amber-900/20"
                 >
-                  {isAnalyzing ? (
+                  {isAnalyzing || isVerifying ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
                   ) : (
                     <Sparkles className="w-4 h-4" />
@@ -479,24 +534,21 @@ export default function App() {
               
               <div className="flex-1 overflow-y-auto p-6 space-y-8">
                 {/* Metrics */}
-                {activeMeeting.analysis.epistemicConfidence && (
-                  <div className="grid grid-cols-2 gap-4">
+                {activeMeeting.analysis.verification && (
+                  <VerificationPanel 
+                    verification={activeMeeting.analysis.verification} 
+                    onQuoteClick={scrollToQuote} 
+                  />
+                )}
+                {activeMeeting.analysis.sentiment && (
+                  <div className="grid grid-cols-1 gap-4">
                     <div className="bg-white/5 border border-white/10 rounded-xl p-4">
                       <div className="flex items-center gap-2 mb-2">
-                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                        <span className="text-[10px] uppercase tracking-widest text-white/40">Confidence</span>
+                        <Activity className="w-4 h-4 text-amber-400" />
+                        <span className="text-[10px] uppercase tracking-widest text-white/40">Sentiment</span>
                       </div>
-                      <div className="text-xl font-serif text-white">{activeMeeting.analysis.epistemicConfidence}%</div>
+                      <div className="text-xl font-serif text-white">{activeMeeting.analysis.sentiment}</div>
                     </div>
-                    {activeMeeting.analysis.sentiment && (
-                      <div className="bg-white/5 border border-white/10 rounded-xl p-4">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Activity className="w-4 h-4 text-amber-400" />
-                          <span className="text-[10px] uppercase tracking-widest text-white/40">Sentiment</span>
-                        </div>
-                        <div className="text-xl font-serif text-white">{activeMeeting.analysis.sentiment}</div>
-                      </div>
-                    )}
                   </div>
                 )}
 

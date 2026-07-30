@@ -5,6 +5,32 @@ export interface ActionItem {
   completed: boolean;
 }
 
+export type Verdict =
+  | 'confirmed'
+  | 'probable'
+  | 'disputed'
+  | 'gap'
+  | 'fabricated';
+
+export interface ClaimVerdict {
+  id: string;
+  claim: string;
+  sourceField: string;
+  verdict: Verdict;
+  quote: string | null;
+  reasoning: string;
+}
+
+export interface VerificationReport {
+  claims: ClaimVerdict[];
+  counts: Record<Verdict, number>;
+  supportScore: number | null;
+  flagged: boolean;
+  judgeModel: string;
+  verifiedAt: string;
+  truncated?: boolean;
+}
+
 export interface MeetingAnalysis {
   summary?: string;
   executiveSummary?: string;
@@ -14,14 +40,13 @@ export interface MeetingAnalysis {
   importantDates?: string[];
   decisionLog?: string[];
   sentiment?: 'Positive' | 'Neutral' | 'Negative';
-  sentimentScore?: number;
-  epistemicConfidence?: number;
   perspectives?: {
     empathy: string;
     operational: string;
   };
   tags?: string[];
   verbatimTranscript?: string;
+  verification?: VerificationReport;
 }
 
 export interface Meeting {
@@ -30,5 +55,6 @@ export interface Meeting {
   date: string;
   transcript: string;
   isUploadedAudio?: boolean;
+  hideTranscript?: boolean;
   analysis?: MeetingAnalysis;
 }

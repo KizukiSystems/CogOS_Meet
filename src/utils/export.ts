@@ -6,13 +6,28 @@ export const exportToMarkdown = (meeting: Meeting) => {
   md += `Date: ${new Date(meeting.date).toLocaleDateString()}\n\n`;
 
   if (meeting.analysis) {
-    if (meeting.analysis.epistemicConfidence) {
-      md += `**Confidence Score:** ${meeting.analysis.epistemicConfidence}%\n`;
+    if (meeting.analysis.verification) {
+      if (meeting.analysis.verification.flagged) {
+        md = `⚠️ WARNING: This analysis contains claims the transcript does not support.\n\n` + md;
+      }
+      md += `## Verification Pass\n\n`;
+      md += `**Support Score:** ${meeting.analysis.verification.supportScore !== null ? meeting.analysis.verification.supportScore + '%' : 'No claims extracted'}\n\n`;
+      md += `**Counts:**\n`;
+      Object.entries(meeting.analysis.verification.counts).forEach(([verdict, count]) => {
+        if (count > 0) md += `- ${verdict}: ${count}\n`;
+      });
+      md += `\n**Claims:**\n`;
+      meeting.analysis.verification.claims.forEach(claim => {
+        md += `- **[${claim.verdict.toUpperCase()}]** ${claim.claim}\n`;
+        if (claim.quote) md += `  > "${claim.quote}"\n`;
+      });
+      md += `\n---\n\n`;
+    } else {
+      md += `**Verification:** Not verified\n\n---\n\n`;
     }
     if (meeting.analysis.sentiment) {
-      md += `**Sentiment:** ${meeting.analysis.sentiment}\n`;
+      md += `**Sentiment:** ${meeting.analysis.sentiment}\n\n---\n\n`;
     }
-    md += `\n---\n\n`;
 
     if (meeting.analysis.executiveSummary) {
       md += `## Executive Summary\n\n${meeting.analysis.executiveSummary}\n\n`;
@@ -65,7 +80,11 @@ export const exportToMarkdown = (meeting: Meeting) => {
     }
   }
 
-  md += `## Transcript\n\n${meeting.transcript}\n`;
+  if (!meeting.hideTranscript) {
+    md += `## Transcript\n\n${meeting.transcript}\n`;
+  } else {
+    md += `## Transcript\n\nSource transcript is hidden because verbatim was not requested.\n`;
+  }
 
   const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -91,13 +110,37 @@ export const exportToWord = async (meeting: Meeting) => {
   ];
 
   if (meeting.analysis) {
-    if (meeting.analysis.epistemicConfidence) {
-      children.push(new Paragraph({ text: `Confidence Score: ${meeting.analysis.epistemicConfidence}%` }));
+    if (meeting.analysis.verification) {
+      if (meeting.analysis.verification.flagged) {
+        children.unshift(new Paragraph({ children: [new TextRun({ text: "⚠️ WARNING: This analysis contains claims the transcript does not support.", bold: true })] }));
+      }
+      children.push(new Paragraph({ text: "Verification Pass", heading: HeadingLevel.HEADING_2 }));
+      children.push(new Paragraph({ text: `Support Score: ${meeting.analysis.verification.supportScore !== null ? meeting.analysis.verification.supportScore + '%' : 'No claims extracted'}` }));
+      
+      const countsStr = Object.entries(meeting.analysis.verification.counts)
+        .filter(([_, count]) => (count as number) > 0)
+        .map(([verdict, count]) => `${verdict}: ${count}`)
+        .join(', ');
+      children.push(new Paragraph({ text: `Counts: ${countsStr}`, spacing: { after: 200 } }));
+      
+      meeting.analysis.verification.claims.forEach(claim => {
+        children.push(new Paragraph({ 
+          children: [
+            new TextRun({ text: `[${claim.verdict.toUpperCase()}] `, bold: true }),
+            new TextRun({ text: claim.claim }),
+          ]
+        }));
+        if (claim.quote) {
+          children.push(new Paragraph({ children: [new TextRun({ text: `"${claim.quote}"`, italics: true })] }));
+        }
+      });
+      children.push(new Paragraph({ text: "", spacing: { after: 200 } }));
+    } else {
+      children.push(new Paragraph({ text: "Verification: Not verified", spacing: { after: 200 } }));
     }
     if (meeting.analysis.sentiment) {
-      children.push(new Paragraph({ text: `Sentiment: ${meeting.analysis.sentiment}` }));
+      children.push(new Paragraph({ text: `Sentiment: ${meeting.analysis.sentiment}`, spacing: { after: 200 } }));
     }
-    children.push(new Paragraph({ text: "", spacing: { after: 200 } }));
 
     if (meeting.analysis.executiveSummary) {
       children.push(new Paragraph({ text: "Executive Summary", heading: HeadingLevel.HEADING_2 }));
@@ -164,10 +207,14 @@ export const exportToWord = async (meeting: Meeting) => {
   }
 
   children.push(new Paragraph({ text: "Transcript", heading: HeadingLevel.HEADING_2 }));
-  const transcriptLines = meeting.transcript.split('\n');
-  transcriptLines.forEach(line => {
-    children.push(new Paragraph({ text: line }));
-  });
+  if (!meeting.hideTranscript) {
+    const transcriptLines = meeting.transcript.split('\n');
+    transcriptLines.forEach(line => {
+      children.push(new Paragraph({ text: line }));
+    });
+  } else {
+    children.push(new Paragraph({ text: "Source transcript is hidden because verbatim was not requested." }));
+  }
 
   const doc = new Document({
     sections: [{
