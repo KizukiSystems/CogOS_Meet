@@ -1,0 +1,6 @@
+{
+  "name": "Meeting Assistant",
+  "description": "Real-time meeting transcription and analysis tool.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
