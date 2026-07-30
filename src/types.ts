@@ -53,6 +53,7 @@ export interface Meeting {
   id: string;
   title: string;
   date: string;
+  category?: string;
   transcript: string;
   isUploadedAudio?: boolean;
   hideTranscript?: boolean;

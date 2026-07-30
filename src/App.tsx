@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Play, Square, Loader2, Sparkles, FileText, Menu, CheckCircle2, History, Brain, ShieldCheck, Activity, Target, Users, Upload, Edit3, Save, X, Download, FileDown, Cloud, Mail, Table, LogOut } from 'lucide-react';
+import { Mic, Play, Square, Loader2, Sparkles, FileText, Menu, CheckCircle2, History, Brain, ShieldCheck, Activity, Target, Users, Upload, Edit3, Save, X, Download, FileDown, Cloud, Mail, Table, LogOut, Search } from 'lucide-react';
 import { useTranscription } from './hooks/useTranscription';
 import { Meeting, MeetingAnalysis } from './types';
 import { UploadModal } from './components/UploadModal';
@@ -9,6 +9,8 @@ import { VerificationPanel } from './components/VerificationPanel';
 import { initAuth, googleSignIn, logout, getAccessToken } from './lib/firebase';
 import { createDriveFile, sendEmail, appendToTrackerSheet } from './lib/workspace';
 import { User } from 'firebase/auth';
+
+const CATEGORIES = ['Sales', 'Engineering', 'General', 'Marketing', 'Product', 'Design', 'Other'];
 
 export default function App() {
   const {
@@ -39,6 +41,21 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isWorkspaceAction, setIsWorkspaceAction] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const filteredMeetings = meetings.filter(m => {
+    if (!searchQuery.trim()) return true;
+    const lowerQuery = searchQuery.toLowerCase();
+    return (
+      m.title.toLowerCase().includes(lowerQuery) ||
+      (m.category && m.category.toLowerCase().includes(lowerQuery)) ||
+      (m.analysis?.tags && m.analysis.tags.some(tag => tag.toLowerCase().includes(lowerQuery)))
+    );
+  });
+
+  const handleCategoryChange = (meetingId: string, category: string) => {
+    setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, category: category === 'None' ? undefined : category } : m));
+  };
 
   const transcriptRef = useRef<HTMLDivElement>(null);
 
@@ -400,32 +417,50 @@ export default function App() {
           <div className="pt-6 pb-2 text-[11px] uppercase tracking-[0.2em] text-white/40 px-2">
             Recent Meetings
           </div>
+
+          <div className="px-2 pb-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
+              <input
+                type="text"
+                placeholder="Search by title or tag..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-4 py-2 text-xs text-white placeholder-white/40 focus:outline-none focus:border-amber-500/50 transition-colors"
+              />
+            </div>
+          </div>
           
-          {meetings.length === 0 ? (
+          {filteredMeetings.length === 0 ? (
             <div className="px-2 py-8 text-sm text-white/40 text-center flex flex-col items-center gap-3">
               <History className="w-8 h-8 opacity-50" />
-              <p>No meetings yet</p>
+              <p>{searchQuery ? 'No matching meetings' : 'No meetings yet'}</p>
             </div>
           ) : (
             <div className="space-y-1">
-              {meetings.map((m) => (
+              {filteredMeetings.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setActiveMeetingId(m.id)}
                   className={`w-full flex flex-col text-left px-4 py-3 rounded-xl transition-colors border ${activeMeetingId === m.id ? 'bg-white/5 border-white/10' : 'border-transparent text-white/60 hover:bg-white/5 hover:text-white'}`}
                 >
                   <span className="text-sm font-medium truncate mb-1">{m.title}</span>
-                  <div className="flex items-center justify-between w-full">
+                  <div className="flex items-center justify-between w-full mt-1">
                     <span className="text-[10px] font-mono text-amber-500/70">{new Date(m.date).toLocaleDateString()}</span>
-                    {m.analysis?.tags && m.analysis.tags.length > 0 && (
-                      <div className="flex gap-1">
-                        {m.analysis.tags.slice(0, 2).map((tag, i) => (
+                    <div className="flex gap-1 items-center">
+                      {m.category && (
+                        <span className="text-[8px] uppercase tracking-widest px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded border border-blue-500/20 truncate max-w-[60px]">
+                          {m.category}
+                        </span>
+                      )}
+                      {m.analysis?.tags && m.analysis.tags.length > 0 && (
+                        m.analysis.tags.slice(0, 1).map((tag, i) => (
                           <span key={i} className="text-[8px] uppercase tracking-widest px-1.5 py-0.5 bg-amber-500/10 text-amber-500 rounded border border-amber-500/20 truncate max-w-[60px]">
                             {tag}
                           </span>
-                        ))}
-                      </div>
-                    )}
+                        ))
+                      )}
+                    </div>
                   </div>
                 </button>
               ))}
@@ -495,9 +530,23 @@ export default function App() {
             </button>
             <div className="h-4 w-px bg-white/20 mx-2"></div>
             {activeMeeting ? (
-              <h2 className="text-sm font-medium text-white/80 flex items-center gap-3 max-w-[200px] sm:max-w-xs md:max-w-md lg:max-w-xl">
-                <FileText className="w-4 h-4 text-white/40 shrink-0" />
-                <span className="truncate">{activeMeeting.title}</span>
+              <div className="flex items-center gap-3 max-w-[200px] sm:max-w-xs md:max-w-md lg:max-w-xl">
+                <h2 className="text-sm font-medium text-white/80 flex items-center gap-3">
+                  <FileText className="w-4 h-4 text-white/40 shrink-0" />
+                  <span className="truncate">{activeMeeting.title}</span>
+                </h2>
+                
+                <select
+                  value={activeMeeting.category || 'None'}
+                  onChange={(e) => handleCategoryChange(activeMeeting.id, e.target.value)}
+                  className="bg-white/5 border border-white/10 rounded-md px-2 py-1 text-xs text-white/80 focus:outline-none focus:border-amber-500/50 hover:bg-white/10 transition-colors"
+                >
+                  <option value="None">No Category</option>
+                  {CATEGORIES.map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+
                 {activeMeeting.analysis?.tags && activeMeeting.analysis.tags.length > 0 && (
                   <div className="flex gap-1 shrink-0 ml-2 hidden sm:flex">
                     {activeMeeting.analysis.tags.map((tag, i) => (
@@ -507,7 +556,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-              </h2>
+              </div>
             ) : (
               <h2 className="text-sm font-medium text-white/80 flex items-center gap-2">
                 Active Session

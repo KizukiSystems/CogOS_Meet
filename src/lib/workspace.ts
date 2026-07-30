@@ -39,12 +39,12 @@ export async function sendEmail(to: string, subject: string, bodyText: string) {
     `Subject: ${subject}`,
     '',
     bodyText
-  ].join('\\r\\n');
+  ].join('\r\n');
 
   // base64url encode
   const encodedMessage = btoa(unescape(encodeURIComponent(message)))
-    .replace(/\\+/g, '-')
-    .replace(/\\//g, '_')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
     .replace(/=+$/, '');
 
   const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
