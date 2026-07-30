@@ -126,7 +126,19 @@ export default function App() {
         body: JSON.stringify({ transcript: textToAnalyze }),
       });
       
-      const data = await response.json();
+      let data;
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        console.error("Non-JSON response:", text);
+        throw new Error(response.status === 413 ? "File too large (server limit)" : `Server error: ${response.status} ${response.statusText}`);
+      }
+      
+      if (!response.ok) {
+        throw new Error(data.error || `Server error: ${response.status}`);
+      }
       
       if (data.analysis) {
         setMeetings((prev) => 
@@ -136,6 +148,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Analysis failed", err);
+      alert(err instanceof Error ? err.message : "Failed to analyze transcript.");
     } finally {
       setIsAnalyzing(false);
     }
@@ -154,8 +167,20 @@ export default function App() {
         method: 'POST',
         body: formData,
       });
-
-      const data = await response.json();
+      
+      let data;
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        console.error("Non-JSON response:", text);
+        throw new Error(response.status === 413 ? "File too large (server limit)" : `Server error: ${response.status} ${response.statusText}`);
+      }
+      
+      if (!response.ok) {
+        throw new Error(data.error || `Server error: ${response.status}`);
+      }
 
       if (data.analysis) {
         const newMeeting: Meeting = {
@@ -175,7 +200,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Upload failed", err);
-      alert("Failed to analyze audio recording.");
+      alert(err instanceof Error ? err.message : "Failed to analyze audio recording.");
     } finally {
       setIsUploading(false);
     }

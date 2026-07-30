@@ -5,6 +5,28 @@ import { GoogleGenAI, Type } from "@google/genai";
 import multer from "multer";
 import os from "os";
 import fs from "fs";
+import ffmpeg from "fluent-ffmpeg";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+
+
+async function withRetry<T>(operation: () => Promise<T>, maxRetries = 2): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      attempt++;
+      if (attempt > maxRetries) {
+        throw error;
+      }
+      console.warn(`Gemini API call failed (attempt ${attempt}/${maxRetries}): ${error.message}. Retrying...`);
+      await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
+    }
+  }
+}
 
 function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = false) {
   const properties: any = {};
@@ -61,6 +83,54 @@ function buildAnalysisSchema(selectedOptions?: string[], includeSentiment = fals
   };
 }
 
+
+const chunkAudio = (inputPath: string, outputDir: string, segmentTime: number = 600): Promise<string[]> => {
+  return new Promise((resolve, reject) => {
+    const outputPath = path.join(outputDir, 'chunk_%03d.mp3');
+    ffmpeg(inputPath)
+      .outputOptions([
+        '-f', 'segment',
+        '-segment_time', `${segmentTime}`,
+        '-c:a', 'libmp3lame'
+      ])
+      .output(outputPath)
+      .on('end', () => {
+        const files = fs.readdirSync(outputDir).filter(f => f.startsWith('chunk_')).sort();
+        resolve(files.map(f => path.join(outputDir, f)));
+      })
+      .on('error', (err) => reject(err))
+      .run();
+  });
+};
+
+const extractTranscript = async (ai: any, filePath: string, mimeType: string, speakers: string): Promise<string> => {
+  let uploadedFile: any = await withRetry(() => ai.files.upload({
+    file: filePath,
+    config: { mimeType }
+  }));
+  let fileInfo: any = await ai.files.get({ name: uploadedFile.name });
+  while (fileInfo.state === "PROCESSING") {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    fileInfo = await ai.files.get({ name: uploadedFile.name });
+  }
+  if (fileInfo.state === "FAILED") {
+    throw new Error("Gemini audio processing failed");
+  }
+
+  const prompt = `Please provide a verbatim transcript of the provided audio recording.${speakers ? " The speakers in this meeting are: " + speakers + ". Please assign their names correctly." : ""}`;
+  
+  const response: any = await withRetry(() => ai.models.generateContent({
+    model: "gemini-3.6-flash",
+    contents: [
+      { fileData: { mimeType: fileInfo.mimeType, fileUri: fileInfo.uri } },
+      prompt
+    ]
+  }));
+  
+  await ai.files.delete({ name: uploadedFile.name }).catch(() => {});
+  return response.text || "";
+};
+
 const normalizeText = (text: string) => {
   if (!text) return "";
   return text
@@ -96,12 +166,12 @@ async function startServer() {
         httpOptions: { timeout: 600000 }
       });
       
-      const uploadedFile = await ai.files.upload({
-        file: req.file.path,
-        config: { mimeType: req.file.mimetype }
-      });
+      const uploadedFile = await withRetry(() => ai.files.upload({
+        file: req.file!.path,
+        config: { mimeType: req.file!.mimetype }
+      }));
 
-      let fileInfo = await ai.files.get({ name: uploadedFile.name });
+      let fileInfo: any = await ai.files.get({ name: uploadedFile.name });
       while (fileInfo.state === "PROCESSING") {
         await new Promise(resolve => setTimeout(resolve, 3000));
         fileInfo = await ai.files.get({ name: uploadedFile.name });
@@ -116,7 +186,7 @@ Please analyze the provided audio recording.
 ${speakers ? "The speakers in this meeting are: " + speakers + ". Please assign their names correctly." : ""}
 Extract the requested fields based on the provided schema.`;
 
-      const response = await ai.models.generateContent({
+      const response: any = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.6-flash",
         contents: [
           { fileData: { mimeType: fileInfo.mimeType, fileUri: fileInfo.uri } },
@@ -126,7 +196,7 @@ Extract the requested fields based on the provided schema.`;
           responseMimeType: "application/json",
           responseSchema: buildAnalysisSchema(selectedOptions, req.body.includeSentiment === 'true')
         }
-      });
+      }));
 
       await ai.files.delete({ name: uploadedFile.name }).catch(() => {});
       fs.unlinkSync(req.file.path);
@@ -159,7 +229,7 @@ Extract the requested fields based on the provided schema.`;
       }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
+      const response: any = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.6-flash",
         contents: `You are an expert meeting analyst.
         
@@ -171,7 +241,7 @@ ${transcript}`,
           responseMimeType: "application/json",
           responseSchema: buildAnalysisSchema([], req.body.includeSentiment === 'true')
         }
-      });
+      }));
 
       let analysisData = {};
       try {
@@ -203,7 +273,7 @@ ${transcript}`,
       }
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
+      const response: any = await withRetry(() => ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
         contents: `SOURCE TRANSCRIPT:
 ${transcript}
@@ -250,7 +320,7 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
             }
           }
         }
-      });
+      }));
 
       let claims = [];
       try {
@@ -313,6 +383,14 @@ You are not scoring. You are not summarizing. Assign verdicts and supply evidenc
       console.error("Error verifying analysis:", error);
       res.status(500).json({ error: "Failed to verify analysis" });
     }
+  });
+
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error("Express error:", err);
+    if (err.type === 'entity.too.large') {
+      return res.status(413).json({ error: "File too large" });
+    }
+    res.status(500).json({ error: err.message || "Internal server error" });
   });
 
   // Vite middleware for development
