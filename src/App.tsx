@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Play, Square, Loader2, Sparkles, FileText, Menu, CheckCircle2, History, Brain, ShieldCheck, Activity, Target, Users, Upload, Edit3, Save, X, Download, FileDown } from 'lucide-react';
+import { Mic, Play, Square, Loader2, AlertCircle, Sparkles, FileText, Menu, CheckCircle2, History, Brain, ShieldCheck, Activity, Target, Users, Upload, Edit3, Save, X, Download, FileDown } from 'lucide-react';
 import { useTranscription } from './hooks/useTranscription';
 import { Meeting, MeetingAnalysis } from './types';
 import { UploadModal } from './components/UploadModal';
@@ -80,7 +80,17 @@ export default function App() {
 
   
   const handleVerify = async (transcript: string, analysis: MeetingAnalysis, meetingId: string) => {
-    setIsVerifying(true);
+    if (!transcript || !transcript.trim()) {
+      setMeetings(prev => prev.map(m => 
+        m.id === meetingId ? { ...m, verificationStatus: 'skipped' } : m
+      ));
+      return;
+    }
+    
+    setMeetings(prev => prev.map(m => 
+      m.id === meetingId ? { ...m, verificationStatus: 'pending' } : m
+    ));
+    
     try {
       const response = await fetch('/api/verify', {
         method: 'POST',
@@ -90,15 +100,18 @@ export default function App() {
       const data = await response.json();
       if (data.verification) {
         setMeetings(prev => prev.map(m => 
-          m.id === meetingId ? { ...m, analysis: { ...m.analysis, verification: data.verification } } : m
+          m.id === meetingId ? { ...m, analysis: { ...m.analysis, verification: data.verification }, verificationStatus: 'complete' } : m
         ));
       } else {
-        console.warn("Verification failed, no data returned.");
+        setMeetings(prev => prev.map(m => 
+          m.id === meetingId ? { ...m, verificationStatus: 'unavailable' } : m
+        ));
       }
     } catch (err) {
       console.error("Verification failed", err);
-    } finally {
-      setIsVerifying(false);
+      setMeetings(prev => prev.map(m => 
+        m.id === meetingId ? { ...m, verificationStatus: 'unavailable' } : m
+      ));
     }
   };
 
@@ -119,6 +132,7 @@ export default function App() {
         setMeetings((prev) => 
           prev.map((m) => m.id === id ? { ...m, analysis: data.analysis } : m)
         );
+        handleVerify(textToAnalyze, data.analysis, id);
       }
     } catch (err) {
       console.error("Analysis failed", err);
@@ -148,9 +162,9 @@ export default function App() {
           id: Date.now().toString(),
           title: `Uploaded: ${file.name}`,
           date: new Date().toISOString(),
-          transcript: data.analysis.verbatimTranscript || "Audio file analyzed. See generated outputs in the synthesis panel.",
+          transcript: data.analysis.verbatimTranscript || "",
           isUploadedAudio: true,
-          hideTranscript: !options.includes("verbatim"),
+          hideTranscript: !data.verbatimRequested,
           analysis: data.analysis
         };
 
@@ -524,17 +538,43 @@ export default function App() {
               <div className="p-6 border-b border-white/10 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-3">
                   <Brain className="w-4 h-4 text-amber-500" />
-                  <h3 className="text-[11px] uppercase tracking-[0.2em] text-white/40">Codette Synthesis</h3>
+                  <h3 className="text-[11px] uppercase tracking-[0.2em] text-white/40">Analysis</h3>
                 </div>
                 <div className="flex items-center gap-1.5 px-2 py-1 bg-white/5 border border-white/10 rounded">
                   <ShieldCheck className="w-3 h-3 text-emerald-500" />
-                  <span className="text-[9px] uppercase tracking-widest text-emerald-500/80">ISNAD Protected</span>
+                  <span className="text-[9px] uppercase tracking-widest text-emerald-500/80">Verified Pass</span>
                 </div>
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 space-y-8">
                 {/* Metrics */}
-                {activeMeeting.analysis.verification && (
+                {activeMeeting.verificationStatus === 'pending' && (
+                  <div className="flex items-center gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-500 text-sm font-medium">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Verifying claims against transcript...
+                  </div>
+                )}
+                {activeMeeting.verificationStatus === 'unavailable' && (
+                  <div className="flex flex-col gap-2 p-4 bg-white/5 border border-white/10 rounded-xl text-white/60 text-sm">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4" />
+                      Not verified. This analysis has not been checked against the transcript.
+                    </div>
+                    <button 
+                      onClick={() => handleVerify(activeMeeting.transcript, activeMeeting.analysis!, activeMeeting.id)}
+                      className="self-start px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded text-xs transition-colors"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {activeMeeting.verificationStatus === 'skipped' && (
+                  <div className="flex items-center gap-2 p-4 bg-white/5 border border-white/10 rounded-xl text-white/60 text-sm">
+                    <AlertCircle className="w-4 h-4" />
+                    Not verified. No source transcript was available.
+                  </div>
+                )}
+                {activeMeeting.verificationStatus === 'complete' && activeMeeting.analysis.verification && (
                   <VerificationPanel 
                     verification={activeMeeting.analysis.verification} 
                     onQuoteClick={scrollToQuote} 
